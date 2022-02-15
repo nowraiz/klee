@@ -59,9 +59,9 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <sstream>
-
 
 using namespace llvm;
 using namespace klee;
@@ -1411,6 +1411,8 @@ int main(int argc, char **argv, char **envp) {
     theInterpreter = Interpreter::create(ctx, IOpts, handler);
   assert(interpreter);
   handler->setInterpreter(interpreter);
+  std::cout << InputFile.c_str() << ";lmao" << std::endl;
+  interpreter->moduleName = InputFile.c_str();
 
   for (int i=0; i<argc; i++) {
     handler->getInfoStream() << argv[i] << (i+1<argc ? " ":"\n");

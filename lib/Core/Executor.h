@@ -17,6 +17,7 @@
 
 #include "ExecutionState.h"
 #include "UserSearcher.h"
+#include "Serializer.h"
 
 #include "klee/ADT/RNG.h"
 #include "klee/Core/Interpreter.h"
@@ -87,6 +88,8 @@ namespace klee {
   /// during an instruction step. Should contain addedStates,
   /// removedStates, and haltExecution, among others.
 
+
+
 class Executor : public Interpreter {
   friend class OwningSearcher;
   friend class WeightedRandomSearcher;
@@ -121,6 +124,9 @@ public:
   /// The random number generator.
   RNG theRNG;
 
+
+  /// The instructions that are only present in the module
+  std::set<std::string> valid_instructions;
 private:
   static const char *TerminateReasonNames[];
 
@@ -227,6 +233,14 @@ private:
 
   /// Typeids used during exception handling
   std::vector<ref<Expr>> eh_typeids;
+
+  /// The serializer holding the training tuples indicating which paths were
+  /// feasible and vice versa
+  Serializer pathSerializer;
+
+  /// name of the input bitcode file. Used to track the instructions only within
+  /// the module
+  std::string moduleName;
 
   /// Return the typeid corresponding to a certain `type_info`
   ref<ConstantExpr> getEhTypeidFor(ref<Expr> type_info);

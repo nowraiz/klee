@@ -87,6 +87,7 @@ typedef unsigned TypeSize;
 #include <fstream>
 #include <iomanip>
 #include <iosfwd>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -2105,6 +2106,16 @@ Function* Executor::getTargetFunction(Value *calledVal, ExecutionState &state) {
 
 void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   Instruction *i = ki->inst;
+
+  // push the instruction to the instruction history of the state
+
+  bool valid = false;
+  if (valid_instructions.find(pathSerializer.getCanonicalName(i)) !=
+      valid_instructions.end()) {
+    state.instructionHistory.push_back(i);
+    valid = true;
+  }
+
   switch (i->getOpcode()) {
     // Control flow
   case Instruction::Ret: {
@@ -2232,10 +2243,44 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (statsTracker && state.stack.back().kf->trackCoverage)
         statsTracker->markBranchVisited(branches.first, branches.second);
 
-      if (branches.first)
-        transferToBasicBlock(bi->getSuccessor(0), bi->getParent(), *branches.first);
-      if (branches.second)
-        transferToBasicBlock(bi->getSuccessor(1), bi->getParent(), *branches.second);
+      std::vector<llvm::Instruction*> ins = state.instructionHistory;
+      if (bi->getSuccessor(0)->size() > 0) {
+        // add the first instruction that would have been executed if it was
+        // feasible
+        ins.push_back(&*bi->getSuccessor(0)->begin());
+      }
+      if (branches.first) {
+        transferToBasicBlock(bi->getSuccessor(0), bi->getParent(),
+                             *branches.first);
+        // this branch is feasible
+        if (valid) {
+          pathSerializer.addTrainingTuple(ins, true);
+        }
+      } else {
+        // the first branch is infeasible
+        if (valid) {
+          pathSerializer.addTrainingTuple(ins, false);
+        }
+      }
+
+      std::vector<llvm::Instruction*> ins2 = state.instructionHistory;
+      if (bi->getSuccessor(1)->size() > 0) {
+        // add the first instruction that would have been executed if it was
+        // feasible
+        ins2.push_back(&*bi->getSuccessor(1)->begin());
+      }
+      if (branches.second) {
+        transferToBasicBlock(bi->getSuccessor(1), bi->getParent(),
+                             *branches.second);
+        if (valid) {
+          pathSerializer.addTrainingTuple(ins2, true);
+        }
+      } else {
+        // the second branch is infeasible
+        if (valid) {
+          pathSerializer.addTrainingTuple(ins2, false);
+        }
+      }
     }
     break;
   }
@@ -2258,6 +2303,9 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     targets.reserve(numDestinations);
     std::vector<ref<Expr>> expressions;
     expressions.reserve(numDestinations);
+    // the targets the end up being infeasible
+    std::vector<BasicBlock *> infeasibleTargets;
+    infeasibleTargets.reserve(numDestinations);
 
     ref<Expr> errorCase = ConstantExpr::alloc(1, Expr::Bool);
     SmallPtrSet<BasicBlock *, 5> destinations;
@@ -2283,6 +2331,9 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (result) {
         targets.push_back(d);
         expressions.push_back(e);
+      } else {
+        // this target seems infeasible
+        infeasibleTargets.push_back(d);
       }
     }
     // check errorCase feasibility
@@ -2309,6 +2360,26 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     for (std::vector<ExecutionState *>::size_type k = 0; k < branches.size(); ++k) {
       if (branches[k]) {
         transferToBasicBlock(targets[k], bi->getParent(), *branches[k]);
+        std::vector<Instruction*> ins = state.instructionHistory;
+        if (targets[k]->size() > 0) {
+          ins.push_back(&*targets[k]->begin());
+          if (valid) {
+            pathSerializer.addTrainingTuple(ins, true);
+          }
+        }
+      }
+    }
+
+    std::cout << "Case" << std::endl;
+    // spurt out the infeasible targets
+    for (std::vector<BasicBlock* >::size_type k = 0; k < infeasibleTargets.size(); ++k) {
+      // all these paths seem infeasible
+      std::vector<Instruction*> ins = state.instructionHistory;
+      if (infeasibleTargets[k]->size() > 0) {
+        ins.push_back(&*infeasibleTargets[k]->begin());
+        if (valid) {
+          pathSerializer.addTrainingTuple(ins, false);
+        }
       }
     }
 
@@ -4486,6 +4557,7 @@ void Executor::runFunctionAsMain(Function *f,
 
   processTree = std::make_unique<PTree>(state);
   run(*state);
+  pathSerializer.dumpTrainingData(std::string("training.data"));
   processTree = nullptr;
 
   // hack to clear memory objects
@@ -4789,5 +4861,15 @@ void Executor::dumpStates() {
 
 Interpreter *Interpreter::create(LLVMContext &ctx, const InterpreterOptions &opts,
                                  InterpreterHandler *ih) {
-  return new Executor(ctx, opts, ih);
+  Executor* executor = new Executor(ctx, opts, ih);
+  std::set<std::string> names;
+  std::ifstream input("valid_instructions.txt");
+  while (input.good()) {
+    std::string name;
+    input >> name;
+    names.insert(name);
+  }
+
+  executor->valid_instructions = names;
+  return executor;
 }

@@ -240,6 +240,9 @@ public:
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled;
 
+  /// the history of the instrucitons that are executed in this state
+  std::vector<llvm::Instruction*> instructionHistory;
+
 public:
   #ifdef KLEE_UNITTEST
   // provide this function only in the context of unittests
