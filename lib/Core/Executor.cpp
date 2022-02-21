@@ -465,7 +465,7 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
       pathWriter(0), symPathWriter(0), specialFunctionHandler(0), timers{time::Span(TimerInterval)},
       replayKTest(0), replayPath(0), usingSeeds(0),
       atMemoryLimit(false), inhibitForking(false), haltExecution(false),
-      ivcEnabled(false), debugLogBuffer(debugBufferString) {
+      ivcEnabled(false), debugLogBuffer(debugBufferString), symbolic(this) {
 
 
   const time::Span maxTime{MaxTime};
@@ -2107,6 +2107,61 @@ Function* Executor::getTargetFunction(Value *calledVal, ExecutionState &state) {
 void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   Instruction *i = ki->inst;
 
+  // uc code
+  if (i->getParent()->getTerminator() == i) {
+    int result;
+    result = state.encode.checkList(i->getParent());
+    if (result == -1) {
+      terminateState(state);
+      return;
+    }
+  }
+
+  if (this->symbolic.isWarning(state, ki) == 1) {
+    state.encode.warningL = true;
+  }
+
+  if (state.encode.warningL) {
+    //        state.encode.warningL = false;
+    if (!state.encode.ckeck) {
+      int result;
+      state.encode.checkUseList(i->getParent());
+      result = state.encode.flag;
+      if (result == -1) {
+        terminateState(state);
+        return;
+      } else if (result == 0) {
+        state.encode.optput();
+        pathSerializer.dumpTrainingData(std::string("training.data"));
+        exit(0);
+      } else if (result == -2) {
+        state.encode.optput();
+      }
+    } else if (state.encode.ckeck) {
+      if (this->symbolic.checkInst(state, ki) == 0) {
+#if DEBUGINFO
+        std::cerr << "checkInst : 0" << "\n";
+#endif
+        int result;
+        state.encode.checkUseList(i->getParent());
+        result = state.encode.flag;
+        if (result == -1) {
+          terminateState(state);
+          return;
+        } else if (result == 0) {
+          state.encode.optput();
+          pathSerializer.dumpTrainingData(std::string("training.data"));
+          exit(0);
+        } else if (result == -2) {
+          state.encode.optput();
+        }
+      } else {
+#if DEBUGINFO
+        std::cerr << "checkInst : !0" << "\n";
+#endif
+      }
+    }
+  }
   // push the instruction to the instruction history of the state
 
   bool valid = false;
@@ -2243,6 +2298,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (statsTracker && state.stack.back().kf->trackCoverage)
         statsTracker->markBranchVisited(branches.first, branches.second);
 
+      /// uc code
+      std::string ld;
+      llvm::raw_string_ostream rso(ld);
+      i->print(rso);
+
       std::vector<llvm::Instruction*> ins = state.instructionHistory;
       if (bi->getSuccessor(0)->size() > 0) {
         // add the first instruction that would have been executed if it was
@@ -2252,6 +2312,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (branches.first) {
         transferToBasicBlock(bi->getSuccessor(0), bi->getParent(),
                              *branches.first);
+        branches.first->encode.addpath("true : " + rso.str());
         // this branch is feasible
         if (valid) {
           pathSerializer.addTrainingTuple(ins, true);
@@ -2272,6 +2333,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (branches.second) {
         transferToBasicBlock(bi->getSuccessor(1), bi->getParent(),
                              *branches.second);
+        branches.second->encode.addpath("false : " + rso.str());
         if (valid) {
           pathSerializer.addTrainingTuple(ins2, true);
         }
@@ -2281,6 +2343,24 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
           pathSerializer.addTrainingTuple(ins2, false);
         }
       }
+      int result;
+      if (cond->getKind() != Expr::Constant) {
+        if (branches.first) {
+          result = branches.first->encode.addBrConstraint(cond, true, bi->getSuccessor(0)->getName(),
+                                                          bi->getSuccessor(1)->getName());
+          if (result == -2) {
+            terminateState(*branches.first);
+          }
+        }
+        if (branches.second) {
+          result = branches.second->encode.addBrConstraint(cond, false, bi->getSuccessor(1)->getName(),
+                                                           bi->getSuccessor(0)->getName());
+          if (result == -2) {
+            terminateState(*branches.second);
+          }
+        }
+      }
+
     }
     break;
   }
@@ -2586,46 +2666,47 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
       executeCall(state, ki, f, arguments);
     } else {
-      ref<Expr> v = eval(ki, 0, state).value;
-
-      ExecutionState *free = &state;
-      bool hasInvalid = false, first = true;
-
-      /* XXX This is wasteful, no need to do a full evaluate since we
-         have already got a value. But in the end the caches should
-         handle it for us, albeit with some overhead. */
-      do {
-        v = optimizer.optimizeExpr(v, true);
-        ref<ConstantExpr> value;
-        bool success =
-            solver->getValue(free->constraints, v, value, free->queryMetaData);
-        assert(success && "FIXME: Unhandled solver failure");
-        (void) success;
-        StatePair res = fork(*free, EqExpr::create(v, value), true);
-        if (res.first) {
-          uint64_t addr = value->getZExtValue();
-          auto it = legalFunctions.find(addr);
-          if (it != legalFunctions.end()) {
-            f = it->second;
-
-            // Don't give warning on unique resolution
-            if (res.second || !first)
-              klee_warning_once(reinterpret_cast<void*>(addr),
-                                "resolved symbolic function pointer to: %s",
-                                f->getName().data());
-
-            executeCall(*res.first, ki, f, arguments);
-          } else {
-            if (!hasInvalid) {
-              terminateStateOnExecError(state, "invalid function pointer");
-              hasInvalid = true;
-            }
-          }
-        }
-
-        first = false;
-        free = res.second;
-      } while (free);
+//      ref<Expr> v = eval(ki, 0, state).value;
+//
+//      ExecutionState *free = &state;
+//      bool hasInvalid = false, first = true;
+//
+//      /* XXX This is wasteful, no need to do a full evaluate since we
+//         have already got a value. But in the end the caches should
+//         handle it for us, albeit with some overhead. */
+//      do {
+//        v = optimizer.optimizeExpr(v, true);
+//        ref<ConstantExpr> value;
+//        bool success =
+//            solver->getValue(free->constraints, v, value, free->queryMetaData);
+//        assert(success && "FIXME: Unhandled solver failure");
+//        (void) success;
+//        StatePair res = fork(*free, EqExpr::create(v, value), true);
+//        if (res.first) {
+//          uint64_t addr = value->getZExtValue();
+//          auto it = legalFunctions.find(addr);
+//          if (it != legalFunctions.end()) {
+//            f = it->second;
+//
+//            // Don't give warning on unique resolution
+//            if (res.second || !first)
+//              klee_warning_once(reinterpret_cast<void*>(addr),
+//                                "resolved symbolic function pointer to: %s",
+//                                f->getName().data());
+//
+//            executeCall(*res.first, ki, f, arguments);
+//          } else {
+//            if (!hasInvalid) {
+//              terminateStateOnExecError(state, "invalid function pointer");
+//              hasInvalid = true;
+//            }
+//          }
+//        }
+//
+//        first = false;
+//        free = res.second;
+//      } while (free);
+      symbolic.callReturnValue(state, ki, f);
     }
     break;
   }
@@ -2858,6 +2939,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       size = MulExpr::create(size, count);
     }
     executeAlloc(state, size, true, ki);
+    this->symbolic.Alloca(state, ki, elementSize);
     break;
   }
 
@@ -3957,9 +4039,12 @@ void Executor::callExternalFunction(ExecutionState &state,
         ce->toMemory(&args[wordIndex]);
         wordIndex += (ce->getWidth()+63)/64;
       } else {
-        terminateStateOnExecError(state, 
-                                  "external call with symbolic argument: " + 
-                                  function->getName());
+//        terminateStateOnExecError(state,
+//                                  "external call with symbolic argument: " +
+//                                  function->getName());
+        std::string message = "external call with symbolic argument: " + function->getName().str();
+        klee_message("symbolic: (location information missing) %s", message.c_str());
+        symbolic.callReturnValue(state, target, function);
         return;
       }
     }
@@ -4008,8 +4093,11 @@ void Executor::callExternalFunction(ExecutionState &state,
 
   bool success = externalDispatcher->executeCall(function, target->inst, args);
   if (!success) {
-    terminateStateOnError(state, "failed external call: " + function->getName(),
-                          External);
+//    terminateStateOnError(state, "failed external call: " + function->getName(),
+//                          External);
+    std::string message = "failed external call" + function->getName().str();
+    klee_message("symbolic: (location information missing) %s", message.c_str());
+    symbolic.callReturnValue(state, target, function);
     return;
   }
 
@@ -4322,17 +4410,145 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           wos->write(offset, value);
         }          
       } else {
-        ref<Expr> result = os->read(offset, type);
-        
+        if (!os->initialize) {
+#if DEBUGINFO
+          std::cerr << "!os->initialize" << "\n";
+#endif
+          unsigned int size = 0;
+          ref<Expr> expr;
+          Type *ty = target->inst->getType();
+          switch (ty->getTypeID()) {
+          case llvm::Type::PointerTyID: {
+
+#if DEBUGINFO
+            std::cerr << "llvm::Type::PointerTyID: " << "\n";
+#endif
+
+            if (PointerType *pt = dyn_cast<PointerType>(ty)) {
+              Type *kind = pt->getElementType();
+              if (kind->isSized()) {
+                size = kmodule->targetData->getTypeStoreSize(kind);
+              } else {
+#if DEBUGINFO
+                std::cerr << "size : " << size << "\n";
+#endif
+              }
+              MemoryObject *lmo = memory->allocate(size,
+                                                   /*isLocal=*/false, /*isGlobal=*/false,
+                                                   /*allocSite=*/target->inst, /*alignment=*/8);
+              bindObjectInState(state, lmo, false);
+              expr = lmo->getBaseExpr();
+              ObjectState *los = bindObjectInState(state, lmo, false);
+              los->initialize = false;
+              //			ref<Expr> kexpr = createSymbolicArg(state, kind, first);
+              ObjectState *wos = state.addressSpace.getWriteable(mo, os);
+#if DEBUGINFO
+              std::cerr << "offset : ";
+              offset->dump();
+              std::cerr << "expr : ";
+              expr->dump();
+#endif
+              wos->write(offset, expr);
+            }
+            break;
+          }
+          case llvm::Type::IntegerTyID: {
+            if (IntegerType *it = dyn_cast<IntegerType>(ty)) {
+              std::string ld;
+              llvm::raw_string_ostream rso(ld);
+              target->inst->print(rso);
+              std::stringstream ss;
+              unsigned int j = rso.str().find("=");
+              for (unsigned int i = 2; i < j; i++) {
+                ss << rso.str().at(i);
+              }
+              std::string name = ss.str() + "uninit";
+              if (ty->isSized()) {
+                size = kmodule->targetData->getTypeStoreSize(ty);
+              }
+              MemoryObject *lmo = memory->allocate(size,
+                                                   /*isLocal=*/false, /*isGlobal=*/false,
+                                                   /*allocSite=*/target->inst, /*alignment=*/8);
+
+              executeMakeSymbolic(state, lmo, name);
+              const ObjectState *los = state.addressSpace.findObject(lmo);
+              expr = los->read(0, it->getBitWidth());
+              state.encode.globalname.push_back(name);
+              state.encode.globalexpr.push_back(expr);
+
+            }
+            break;
+          }
+          case llvm::Type::StructTyID: {
+            if (StructType *st = dyn_cast<StructType>(ty)) {
+              if (ty->isSized()) {
+                size = kmodule->targetData->getTypeStoreSize(ty);
+              }
+              MemoryObject *lmo = memory->allocate(size,
+                                                   /*isLocal=*/false, /*isGlobal=*/false,
+                                                   /*allocSite=*/target->inst, /*alignment=*/8);
+              for (Type::subtype_iterator ae = st->element_begin(); ae != st->element_end();) {
+                ae++;
+                //				MemoryObject *mo = createSymbolicArg(state, *ae, first);
+              }
+              expr = lmo->getBaseExpr();
+              assert("StructTyID" && 0);
+
+            }
+            break;
+          }
+          default: {
+
+          }
+          }
+        }
+#if DEBUGINFO
+        std::cerr << "type : " << type << "\n";
+        std::cerr << "offset : ";
+        offset->dump();
+#endif
+        const ObjectState *nos = state.addressSpace.findObject(mo);
+        ref<Expr> result = nos->read(offset, type);
+
+#if DEBUGINFO
+        std::cerr << "load value :";
+        result->dump();
+#endif
+
         if (interpreterOpts.MakeConcreteSymbolic)
           result = replaceReadWithSymbolic(state, result);
         
         bindLocal(target, state, result);
+#if DEBUGINFO
+        ref<Expr> value = getDestCell(state, target).value;
+        std::cerr << "load value :";
+        value->dump();
+#endif
+        symbolic.load(state, target);
       }
 
       return;
+    } else {
+#if DEBUGINFO
+      std::cerr << "!inBounds\n";
+#endif
+      if (isWrite) {
+
+      } else {
+        symbolic.load(state, target);
+      }
+      return;
     }
-  } 
+  } else {
+#if DEBUGINFO
+    std::cerr << "!success\n";
+#endif
+    if (isWrite) {
+
+    } else {
+      symbolic.load(state, target);
+    }
+  }
 
   // we are on an error path (no resolution, multiple resolution, one
   // resolution with out of bounds)
@@ -4381,8 +4597,9 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     if (incomplete) {
       terminateStateEarly(*unbound, "Query timed out (resolve).");
     } else {
-      terminateStateOnError(*unbound, "memory error: out of bound pointer", Ptr,
-                            NULL, getAddressInfo(*unbound, address));
+//      terminateStateOnError(*unbound, "memory error: out of bound pointer", Ptr,
+//                            NULL, getAddressInfo(*unbound, address));
+      klee_message("symbolic: memory error: out of bound pointer");
     }
   }
 }
@@ -4464,6 +4681,91 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
 
 /***/
 
+ref<Expr> Executor::createSymbolicArg(ExecutionState &state, Type *ty,
+                                      Instruction *first) {
+
+  ref<Expr> expr;
+  unsigned int size = 0;
+#if DEBUGINFO
+  ty->dump();
+  std::cerr << "getTypeID : ";
+  std::cerr << ty->getTypeID() << "\n";
+#endif
+
+  switch (ty->getTypeID()) {
+  case llvm::Type::PointerTyID: {
+    if (PointerType *pt = dyn_cast<PointerType>(ty)) {
+      Type *kind = pt->getElementType();
+      if (kind->isSized()) {
+        size = kmodule->targetData->getTypeStoreSize(kind);
+      }
+      MemoryObject *mo = memory->allocate(size,
+                                          /*isLocal=*/false, /*isGlobal=*/false,
+                                          /*allocSite=*/first, /*alignment=*/8);
+      bindObjectInState(state, mo, false);
+      expr = mo->getBaseExpr();
+      ObjectState *os = bindObjectInState(state, mo, false);
+      os->initialize = false;
+      //			ref<Expr> kexpr = createSymbolicArg(state, kind, first);
+      //			os->write(NumPtrBytes, kexpr);
+
+    }
+    break;
+  }
+  case llvm::Type::IntegerTyID: {
+    if (IntegerType *it = dyn_cast<IntegerType>(ty)) {
+
+      std::stringstream ss;
+      ss << "input_" << argNum;
+      std::string name = ss.str();
+
+      argNum++;
+      if (ty->isSized()) {
+        size = kmodule->targetData->getTypeStoreSize(ty);
+      }
+      MemoryObject *mo = memory->allocate(size,
+                                          /*isLocal=*/false, /*isGlobal=*/false,
+                                          /*allocSite=*/first, /*alignment=*/8);
+
+      executeMakeSymbolic(state, mo, name);
+      const ObjectState *os = state.addressSpace.findObject(mo);
+      expr = os->read(0, it->getBitWidth());
+      state.encode.globalname.push_back(name);
+      state.encode.globalexpr.push_back(expr);
+
+    }
+    break;
+  }
+  case llvm::Type::StructTyID: {
+    if (StructType *st = dyn_cast<StructType>(ty)) {
+      if (ty->isSized()) {
+        size = kmodule->targetData->getTypeStoreSize(ty);
+      }
+      MemoryObject *mo = memory->allocate(size,
+                                          /*isLocal=*/false, /*isGlobal=*/true,
+                                          /*allocSite=*/first, /*alignment=*/8);
+      for (Type::subtype_iterator ae = st->element_begin(); ae != st->element_end();) {
+        ae++;
+        //				MemoryObject *mo = createSymbolicArg(state, *ae, first);
+      }
+      expr = mo->getBaseExpr();
+      assert("StructTyID" && 0);
+
+    }
+    break;
+  }
+  default: {
+
+  }
+  }
+#if DEBUGINFO
+  std::cerr << "expr : ";
+  expr->dump();
+  std::cerr << "size : " << size << "\n";
+#endif
+  return expr;
+}
+
 void Executor::runFunctionAsMain(Function *f,
 				 int argc,
 				 char **argv,
@@ -4474,7 +4776,7 @@ void Executor::runFunctionAsMain(Function *f,
   srand(1);
   srandom(1);
   
-  MemoryObject *argvMO = 0;
+//  MemoryObject *argvMO = 0;
 
   // In order to make uclibc happy and be closer to what the system is
   // doing we lay out the environments at the end of the argv array
@@ -4484,35 +4786,48 @@ void Executor::runFunctionAsMain(Function *f,
   int envc;
   for (envc=0; envp[envc]; ++envc) ;
 
-  unsigned NumPtrBytes = Context::get().getPointerWidth() / 8;
-  KFunction *kf = kmodule->functionMap[f];
-  assert(kf);
-  Function::arg_iterator ai = f->arg_begin(), ae = f->arg_end();
-  if (ai!=ae) {
-    arguments.push_back(ConstantExpr::alloc(argc, Expr::Int32));
-    if (++ai!=ae) {
-      Instruction *first = &*(f->begin()->begin());
-      argvMO =
-          memory->allocate((argc + 1 + envc + 1 + 1) * NumPtrBytes,
-                           /*isLocal=*/false, /*isGlobal=*/true,
-                           /*allocSite=*/first, /*alignment=*/8);
-
-      if (!argvMO)
-        klee_error("Could not allocate memory for function arguments");
-
-      arguments.push_back(argvMO->getBaseExpr());
-
-      if (++ai!=ae) {
-        uint64_t envp_start = argvMO->address + (argc+1)*NumPtrBytes;
-        arguments.push_back(Expr::createPointer(envp_start));
-
-        if (++ai!=ae)
-          klee_error("invalid main function (expect 0-3 arguments)");
-      }
-    }
-  }
+//  unsigned NumPtrBytes = Context::get().getPointerWidth() / 8;
+//  KFunction *kf = kmodule->functionMap[f];
+//  assert(kf);
+//  Function::arg_iterator ai = f->arg_begin(), ae = f->arg_end();
+//  if (ai!=ae) {
+//    arguments.push_back(ConstantExpr::alloc(argc, Expr::Int32));
+//    if (++ai!=ae) {
+//      Instruction *first = &*(f->begin()->begin());
+//      argvMO =
+//          memory->allocate((argc + 1 + envc + 1 + 1) * NumPtrBytes,
+//                           /*isLocal=*/false, /*isGlobal=*/true,
+//                           /*allocSite=*/first, /*alignment=*/8);
+//
+//      if (!argvMO)
+//        klee_error("Could not allocate memory for function arguments");
+//
+//      arguments.push_back(argvMO->getBaseExpr());
+//
+//      if (++ai!=ae) {
+//        uint64_t envp_start = argvMO->address + (argc+1)*NumPtrBytes;
+//        arguments.push_back(Expr::createPointer(envp_start));
+//
+//        if (++ai!=ae)
+//          klee_error("invalid main function (expect 0-3 arguments)");
+//      }
+//    }
+//  }
 
   ExecutionState *state = new ExecutionState(kmodule->functionMap[f]);
+  state->encode.Json = this->json;
+  state->encode.json = nlohmann::json::parse(this->json);
+  state->encode.addList();
+
+  KFunction* kf = kmodule->functionMap[f];
+  assert(kf);
+  Function::arg_iterator ai = f->arg_begin(), ae = f->arg_end();
+
+  Instruction* first = &*(f->begin()->begin());
+  for (; ai != ae; ai++) {
+    ref<Expr> expr = createSymbolicArg(*state, ai->getType(), first);
+    arguments.push_back(expr);
+  }
 
   if (pathWriter) 
     state->pathOS = pathWriter->open();
@@ -4527,31 +4842,31 @@ void Executor::runFunctionAsMain(Function *f,
   for (unsigned i = 0, e = f->arg_size(); i != e; ++i)
     bindArgument(kf, i, *state, arguments[i]);
 
-  if (argvMO) {
-    ObjectState *argvOS = bindObjectInState(*state, argvMO, false);
-
-    for (int i=0; i<argc+1+envc+1+1; i++) {
-      if (i==argc || i>=argc+1+envc) {
-        // Write NULL pointer
-        argvOS->write(i * NumPtrBytes, Expr::createPointer(0));
-      } else {
-        char *s = i<argc ? argv[i] : envp[i-(argc+1)];
-        int j, len = strlen(s);
-
-        MemoryObject *arg =
-            memory->allocate(len + 1, /*isLocal=*/false, /*isGlobal=*/true,
-                             /*allocSite=*/state->pc->inst, /*alignment=*/8);
-        if (!arg)
-          klee_error("Could not allocate memory for function arguments");
-        ObjectState *os = bindObjectInState(*state, arg, false);
-        for (j=0; j<len+1; j++)
-          os->write8(j, s[j]);
-
-        // Write pointer to newly allocated and initialised argv/envp c-string
-        argvOS->write(i * NumPtrBytes, arg->getBaseExpr());
-      }
-    }
-  }
+//  if (argvMO) {
+//    ObjectState *argvOS = bindObjectInState(*state, argvMO, false);
+//
+//    for (int i=0; i<argc+1+envc+1+1; i++) {
+//      if (i==argc || i>=argc+1+envc) {
+//        // Write NULL pointer
+//        argvOS->write(i * NumPtrBytes, Expr::createPointer(0));
+//      } else {
+//        char *s = i<argc ? argv[i] : envp[i-(argc+1)];
+//        int j, len = strlen(s);
+//
+//        MemoryObject *arg =
+//            memory->allocate(len + 1, /*isLocal=*/false, /*isGlobal=*/true,
+//                             /*allocSite=*/state->pc->inst, /*alignment=*/8);
+//        if (!arg)
+//          klee_error("Could not allocate memory for function arguments");
+//        ObjectState *os = bindObjectInState(*state, arg, false);
+//        for (j=0; j<len+1; j++)
+//          os->write8(j, s[j]);
+//
+//        // Write pointer to newly allocated and initialised argv/envp c-string
+//        argvOS->write(i * NumPtrBytes, arg->getBaseExpr());
+//      }
+//    }
+//  }
   
   initializeGlobals(*state);
 
@@ -4872,4 +5187,50 @@ Interpreter *Interpreter::create(LLVMContext &ctx, const InterpreterOptions &opt
 
   executor->valid_instructions = names;
   return executor;
+}
+
+bool Executor::getMemoryObject(ObjectPair &op, ExecutionState &state, AddressSpace *addressSpace, ref<Expr> address) {
+  bool success;
+  if (!addressSpace->resolveOne(state, solver, address, op, success)) {
+    address = toConstant(state, address, "resolveOne failure");
+    success = addressSpace->resolveOne(cast<ConstantExpr>(address), op);
+  }
+  return success;
+}
+
+bool Executor::isGlobalMO(const MemoryObject *mo) {
+  bool result;
+  if (mo->isGlobal) {
+    result = true;
+  } else {
+    if (mo->isLocal) {
+      result = false;
+    } else {
+      result = true;
+    }
+  }
+  return result;
+}
+
+Cell &Executor::uneval(KInstruction *ki, unsigned index,
+                       ExecutionState &state) {
+  assert(index < ki->inst->getNumOperands());
+  int vnumber = ki->operands[index];
+
+  assert(vnumber != -1 &&
+         "Invalid operand to eval(), not a value or constant!");
+
+  // Determine if this is a constant or not.
+  if (vnumber < 0) {
+    unsigned index = -vnumber - 2;
+    return kmodule->constantTable[index];
+  } else {
+    unsigned index = vnumber;
+    StackFrame &sf = state.stack.back();
+#if DEBUGINFO
+    std::cerr << "index : " << index << "\n";
+    state.dumpStack(llvm::errs());
+#endif
+    return sf.locals[index];
+  }
 }

@@ -46,5 +46,6 @@ target_link_libraries(kleeCore PRIVATE
   kleeModule
   kleaverSolver
   kleaverExpr
+  kleeEncode
   kleeSupport
 )

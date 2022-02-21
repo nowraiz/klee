@@ -66,7 +66,11 @@
 using namespace llvm;
 using namespace klee;
 
+#include "../lib/Encode/json11.hpp"
 namespace {
+  cl::opt<std::string>
+  Json("json", cl::desc("the json object"), cl::init(""));
+
   cl::opt<std::string>
   InputFile(cl::desc("<input bytecode>"), cl::Positional, cl::init("-"));
 
@@ -1168,6 +1172,12 @@ int main(int argc, char **argv, char **envp) {
 #else
   sys::PrintStackTraceOnErrorSignal();
 #endif
+
+  std::string err;
+  const auto json = json11::Json::parse(Json, err);
+  EntryPoint = json["function"].dump();
+  EntryPoint.erase(EntryPoint.begin(), EntryPoint.begin() + 1);
+  EntryPoint.erase(EntryPoint.end() - 1, EntryPoint.end());
 
   if (Watchdog) {
     if (MaxTime.empty()) {

@@ -190,6 +190,8 @@ public:
 
   bool readOnly;
 
+  bool initialize;
+
 public:
   /// Create a new object state for the given memory object with concrete
   /// contents. The initial contents are undefined, it is the callers
@@ -200,6 +202,8 @@ public:
   /// contents.
   ObjectState(const MemoryObject *mo, const Array *array);
 
+  /// uc code
+  ObjectState(unsigned size, const Array *array);
   ObjectState(const ObjectState &os);
   ~ObjectState();
 

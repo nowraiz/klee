@@ -20,6 +20,7 @@
 #include "klee/Module/KInstIterator.h"
 #include "klee/Solver/Solver.h"
 #include "klee/System/Time.h"
+#include "../Encode/Encode.h"
 
 #include <map>
 #include <memory>
@@ -239,6 +240,8 @@ public:
 
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled;
+
+  Encode encode;
 
   /// the history of the instrucitons that are executed in this state
   std::vector<llvm::Instruction*> instructionHistory;

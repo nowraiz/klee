@@ -6,10 +6,16 @@
 # License. See LICENSE.TXT for details.
 #
 #===------------------------------------------------------------------------===#
-add_subdirectory(Basic)
-add_subdirectory(Support)
-add_subdirectory(Expr)
-add_subdirectory(Solver)
-add_subdirectory(Module)
-add_subdirectory(Core)
-add_subdirectory(Encode)
+klee_add_component(kleeEncode
+        Encode.cpp
+        Symbolic.cpp
+        KQuery2Z3.cpp
+        json11.cpp
+        )
+
+set(LLVM_COMPONENTS
+        support
+        )
+klee_get_llvm_libs(LLVM_LIBS ${LLVM_COMPONENTS})
+target_link_libraries(kleeEncode PUBLIC ${LLVM_LIBS})
+target_link_libraries(kleeEncode PRIVATE kleeCore)

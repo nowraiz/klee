@@ -50,6 +50,7 @@ public:
 
 class Interpreter {
 public:
+  std::string json;
   std::string moduleName;
   /// ModuleOptions - Module level options which can be set when
   /// registering a module with the interpreter.

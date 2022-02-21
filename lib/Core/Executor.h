@@ -30,6 +30,7 @@
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/raw_ostream.h"
+#include "../Encode/Symbolic.h"
 
 #include <map>
 #include <memory>
@@ -384,8 +385,6 @@ private:
   // Used for testing.
   ref<Expr> replaceReadWithSymbolic(ExecutionState &state, ref<Expr> e);
 
-  const Cell& eval(KInstruction *ki, unsigned index, 
-                   ExecutionState &state) const;
 
   Cell& getArgumentCell(ExecutionState &state,
                         KFunction *kf,
@@ -393,15 +392,9 @@ private:
     return state.stack.back().locals[kf->getArgRegister(index)];
   }
 
-  Cell& getDestCell(ExecutionState &state,
-                    KInstruction *target) {
-    return state.stack.back().locals[target->dest];
-  }
 
-  void bindLocal(KInstruction *target, 
-                 ExecutionState &state, 
-                 ref<Expr> value);
-  void bindArgument(KFunction *kf, 
+
+  void bindArgument(KFunction *kf,
                     unsigned index,
                     ExecutionState &state,
                     ref<Expr> value);
@@ -569,6 +562,32 @@ public:
 
   /// Returns the errno location in memory of the state
   int *getErrnoLocation(const ExecutionState &state) const;
+
+  /// uc code
+  Symbolic symbolic;
+
+  bool getMemoryObject(ObjectPair &op, ExecutionState &state, AddressSpace *addressSpace, ref<Expr> address);
+
+  bool isGlobalMO(const MemoryObject *mo);
+
+  Cell& getDestCell(ExecutionState &state,
+                    KInstruction *target) {
+    return state.stack.back().locals[target->dest];
+  }
+
+  void bindLocal(KInstruction *target,
+                 ExecutionState &state,
+                 ref<Expr> value);
+
+  ref<Expr> createSymbolicArg(ExecutionState &state, Type *ty,
+                              Instruction *first);
+  int argNum;
+
+  const Cell& eval(KInstruction *ki, unsigned index,
+                   ExecutionState &state) const;
+
+  Cell &uneval(KInstruction *ki, unsigned index,
+               ExecutionState &state);
 
   MergingSearcher *getMergingSearcher() const { return mergingSearcher; };
   void setMergingSearcher(MergingSearcher *ms) { mergingSearcher = ms; };

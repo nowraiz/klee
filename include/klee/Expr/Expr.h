@@ -497,7 +497,7 @@ public:
   /// the array size.
   const std::vector<ref<ConstantExpr> > constantValues;
 
-private:
+public:
   unsigned hashValue;
 
   // FIXME: Make =delete when we switch to C++11

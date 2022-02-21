@@ -127,6 +127,21 @@ ObjectState::ObjectState(const ObjectState &os)
   memcpy(concreteStore, os.concreteStore, size*sizeof(*concreteStore));
 }
 
+ObjectState::ObjectState(unsigned size, const Array *array)
+    : copyOnWriteOwner(0),
+      object(0),
+      concreteStore(new uint8_t[size]),
+      concreteMask(0),
+      flushMask(0),
+      knownSymbolics(0),
+      updates(array, 0),
+      size(size),
+      readOnly(false) {
+  makeSymbolic();
+  memset(concreteStore, 0, size);
+  initialize = true;
+}
+
 ObjectState::~ObjectState() {
   delete concreteMask;
   delete flushMask;
